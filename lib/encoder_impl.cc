@@ -340,31 +340,64 @@ void encoder_impl::prepare_group3a(void) {
 	d_tmc_segment_index = (d_tmc_segment_index + 1) % 2;
 }
 
-/* see page 28 and Annex G, page 81 in the standard
- * NOTE: The logic to transmit this group only once per minute, at the
- * top of the minute, is handled in the work() function. */
+/*
+ * Implementation of group4a based on NRSC-4-B standard.
+ * See page 14, Figure 20 of NRSC-4-B, April 2011. */
 void encoder_impl::prepare_group4a(void) {
 	time_t rightnow;
 	time(&rightnow);
-	tm *utc = gmtime(&rightnow);
-    tm *local = localtime(&rightnow);
 
-	/* we're supposed to send UTC time; the receiver should then add the
-	* local timezone offset */
-	int m = utc->tm_min;
-	int h = utc->tm_hour;
-	int D = utc->tm_mday;
-	int M = utc->tm_mon + 1;  // January: M=0
-	int Y = utc->tm_year;
-	int toffset=local->tm_hour-h;
+    // Use re-entrant `_r`/`_s` functions to prevent static buffer overwrite from gmtime/localtime.
+    tm utc_struct;
+    tm local_struct;
+    #if defined(_WIN32)
+        gmtime_s(&utc_struct, &rightnow);
+        localtime_s(&local_struct, &rightnow);
+    #else // POSIX (Linux, macOS, etc.)
+        gmtime_r(&rightnow, &utc_struct);
+        localtime_r(&rightnow, &local_struct);
+    #endif
 
-	int L = ((M == 1) || (M == 2)) ? 1 : 0;
-	int mjd=14956+D+int((Y-L)*365.25)+int((M+1+L*12)*30.6001);
+	// Get UTC time components from our safe buffer.
+	int minute = utc_struct.tm_min;
+	int hour = utc_struct.tm_hour;
+	int day = utc_struct.tm_mday;
+	int month = utc_struct.tm_mon + 1;
+	int year = utc_struct.tm_year + 1900;
 
+	// Calculate MJD using a standard integer algorithm (Gregorian to JDN).
+    int a = (14 - month) / 12;
+    int y = year + 4800 - a;
+    int m_calc = month + 12 * a - 3;
+    int jdn = day + (153 * m_calc + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045;
+    int mjd = jdn - 2400001; // Convert JDN to MJD
+
+	// Calculate local time offset portably.
+    long offset_secs = 0;
+    #if defined(_WIN32)
+        // Windows: _get_timezone is seconds WEST of UTC.
+        long timezone_sec = 0;
+        _get_timezone(&timezone_sec);
+        offset_secs = -timezone_sec;
+        if (local_struct.tm_isdst > 0) {
+            long dst_sec = 0;
+            _get_dstbias(&dst_sec);
+            offset_secs += dst_sec;
+        }
+    #else
+        // POSIX: tm_gmtoff is seconds EAST of UTC.
+        offset_secs = local_struct.tm_gmtoff;
+    #endif
+
+    double offset_in_half_hours = round((double)offset_secs / 1800.0);
+    unsigned int offset_sign_bit = (offset_in_half_hours < 0) ? 1 : 0;
+    unsigned int offset_magnitude = (unsigned int)fabs(offset_in_half_hours);
+    unsigned int offset_code = (offset_sign_bit << 5) | (offset_magnitude & 0x1F);
+
+    // Pack data using the original, proven bit-packing structure.
 	d_infoword[1] |= ((mjd >> 15) & 0x3);
-	d_infoword[2] = (((mjd >> 7) & 0xff) << 8) | ((mjd & 0x7f) << 1) | ((h >> 4) & 0x1);
-	d_infoword[3] = ((h & 0xf) << 12) | (((m >> 2) & 0xf) << 8) | ((m & 0x3) << 6) |
-		((toffset > 0 ? 0 : 1) << 5) | (abs(toffset * 2));
+	d_infoword[2] = (((mjd >> 7) & 0xff) << 8) | ((mjd & 0x7f) << 1) | ((hour >> 4) & 0x1);
+	d_infoword[3] = ((hour & 0xf) << 12) | (((minute >> 2) & 0xf) << 8) | ((minute & 0x3) << 6) | (offset_code & 0x3F);
 }
 
 // TMC Alert-C
