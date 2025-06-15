@@ -14,7 +14,7 @@
 /* BINDTOOL_GEN_AUTOMATIC(0)                                                       */
 /* BINDTOOL_USE_PYGCCXML(0)                                                        */
 /* BINDTOOL_HEADER_FILE(encoder.h)                                       	   */
-/* BINDTOOL_HEADER_FILE_HASH(67c382b4126ed6cf3956c324eec3b60d)                     */
+/* BINDTOOL_HEADER_FILE_HASH(67c785ff913f23410ca8e5dbc09a9a6b)                     */
 /***********************************************************************************/
 
 #include <pybind11/complex.h>
@@ -43,7 +43,7 @@ void bind_encoder(py::module& m)
              py::arg("ms"),
              py::arg("ps"),
              py::arg("af"),
-             py::arg("af1"),
+             py::arg("af_list"),
              py::arg("tp"),
              py::arg("ta"),
              py::arg("tmc"),
@@ -59,5 +59,10 @@ void bind_encoder(py::module& m)
         .def("set_ps",
              &encoder::set_ps,
              py::arg("ps"),
-             D(encoder, set_ps));
+             D(encoder, set_ps))
+
+        .def("set_af_list",
+             &encoder::set_af_list,
+             py::arg("af_list"),
+             D(encoder, set_af_list));
 }

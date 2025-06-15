@@ -28,11 +28,12 @@
 #include <time.h>
 #include <cstdio>
 #include <iostream>
+#include <vector>
 
 using namespace gr::rds;
 
 encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::string ps,
-                           bool af, double af1, bool tp, bool ta, bool tmc, bool ct,
+                           bool af, const std::vector<double>& af_list, bool tp, bool ta, bool tmc, bool ct,
                            int pi_country_code, int pi_coverage_area, int pi_reference_number,
                            std::string radiotext, bool ecc, unsigned char ecc_code)
     : gr::sync_block("gr_rds_encoder", gr::io_signature::make(0, 0, 0), gr::io_signature::make(1, 1, sizeof(unsigned char))),
@@ -41,7 +42,7 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::stri
       d_pty_locale(pty_locale),   // PTY display standard (Europe or North America)
       d_pi(0),                    // Program Identification, calculated in constructor body
       d_pty(pty),                 // programm type (education)
-      d_af1(af1),                 // alternate frequency 1
+      d_af_list(af_list),         // alternate frequency list
       d_ecc_code(ecc_code),       // Value for the new ECC feature
       d_ms(ms),                   // music/speech switch (1=music)
       d_tp(tp),                   // traffic programm
@@ -60,6 +61,7 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::stri
       d_ps_segment_index(0),
       d_radiotext_segment_index(0),
       d_tmc_segment_index(0),
+      d_af_index(0),
       d_current_buffer(0),
       d_buffer_bit_counter(0),
       d_last_ct_time(0),
@@ -124,6 +126,7 @@ void encoder_impl::rebuild() {
 
 	count_groups();
 	d_current_buffer = 0;
+    d_af_index = 0;
     d_last_ct_time = 0; // Reset last update time on rebuild
 
 	// allocate memory for nbuffers buffers of 104 unsigned chars each
@@ -179,7 +182,7 @@ void encoder_impl::rds_in(pmt::pmt_t msg) {
 	unsigned int ui1;
 	std::string s1;
 	bool b1;
-	double d1;
+    std::vector<double> vd1;
 
 	if(phrase_parse(in.begin(), in.end(), "pty" >> (("0x" >> hex) | uint_), space, ui1)) {
 		set_pty(ui1);
@@ -195,9 +198,9 @@ void encoder_impl::rds_in(pmt::pmt_t msg) {
 		set_ms(b1);
 	} else if(phrase_parse(in.begin(), in.end(), "pi" >> lit("0x") >> hex, space, ui1)) {
 		set_pi(ui1);
-	} else if(phrase_parse(in.begin(), in.end(), "af1" >> double_, space, d1)) {
-		set_af1(d1);
-	} else {
+	} else if(phrase_parse(in.begin(), in.end(), "af_list" >> +double_, space, vd1)) {
+        set_af_list(vd1);
+    } else {
 		std::cout << "RDS: command not understood" << std::endl;
 	}
 
@@ -205,11 +208,18 @@ void encoder_impl::rds_in(pmt::pmt_t msg) {
 }
 
 void encoder_impl::set_ms(bool ms) { d_ms = ms; }
-void encoder_impl::set_af1(double af1) { d_af1 = af1; }
 void encoder_impl::set_tp(bool tp) { d_tp = tp; }
 void encoder_impl::set_ta(bool ta) { d_ta = ta; }
 void encoder_impl::set_pty(unsigned int pty) { if (pty <= 31) d_pty = pty; }
 void encoder_impl::set_pi(unsigned int pi) { if (pi <= 0xFFFF) d_pi = pi; }
+
+void encoder_impl::set_af_list(const std::vector<double>& af_list)
+{
+    gr::thread::scoped_lock lock(d_mutex);
+    d_af_list = af_list;
+    d_af_index = 0;
+    rebuild();
+}
 
 void encoder_impl::set_radiotext(std::string text) {
 	size_t len = std::min(sizeof(d_radiotext), text.length());
@@ -297,10 +307,17 @@ void encoder_impl::prepare_group0(const bool AB) {
 		d_infoword[1] |= 0x5;  // d0=1 (stereo), d1-3=0
 	d_infoword[1] |= (d_ps_segment_index & 0x3);
 	if(!AB) { // This is Group 0A
-        if (d_af) { // AF is enabled: transmit the AF code
-            d_infoword[2] = (225 << 8) | // 1 AF follows
-                (encode_af(d_af1/1000000) & 0xff);
-        } else { // AF is disabled: repeat the PI code in this block for robustness
+        if (d_af && !d_af_list.empty()) { // AF is enabled and list is not empty
+            // Get the current AF from the list
+            double current_af_freq = d_af_list[d_af_index];
+            unsigned int af_code = encode_af(current_af_freq / 1000000.0);
+
+            // The code 225 means "1 AF follows". We send one at a time.
+            d_infoword[2] = (225 << 8) | (af_code & 0xff);
+
+            // Cycle to the next AF for the next Group 0A transmission
+            d_af_index = (d_af_index + 1) % d_af_list.size();
+        } else { // AF is disabled or list is empty: repeat PI code for robustness
             d_infoword[2] = d_pi;
         }
 	} else { // This is Group 0B
@@ -473,12 +490,12 @@ int encoder_impl::work (int noutput_items,
 }
 
 encoder::sptr encoder::make (unsigned char pty_locale, int pty, bool ms,
-		std::string ps, bool af, double af1, bool tp,
+		std::string ps, bool af, const std::vector<double>& af_list, bool tp,
 		bool ta, bool tmc, bool ct, int pi_country_code, int pi_coverage_area,
 		int pi_reference_number, std::string radiotext, bool ecc, unsigned char ecc_code) {
 
 	return gnuradio::get_initial_sptr(
-			new encoder_impl(pty_locale, pty, ms, ps, af, af1, tp, ta,
+			new encoder_impl(pty_locale, pty, ms, ps, af, af_list, tp, ta,
                     tmc, ct, pi_country_code, pi_coverage_area, pi_reference_number,
 					radiotext, ecc, ecc_code));
 }

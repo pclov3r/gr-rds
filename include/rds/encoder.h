@@ -20,6 +20,7 @@
 
 #include <rds/api.h>
 #include <gnuradio/sync_block.h>
+#include <vector>
 
 namespace gr {
 namespace rds {
@@ -33,7 +34,7 @@ public:
                      bool ms,
                      std::string ps,
                      bool af,
-                     double af1,
+                     const std::vector<double>& af_list,
                      bool tp,
                      bool ta,
                      bool tmc,
@@ -46,6 +47,7 @@ public:
                      unsigned char ecc);
 
     virtual void set_ps(std::string ps) = 0;
+    virtual void set_af_list(const std::vector<double>& af_list) = 0;
 };
 
 }

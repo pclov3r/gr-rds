@@ -44,10 +44,10 @@ parameters:
     dtype: bool
     default: 'False'
     options: ['True', 'False']
--   id: af1
-    label: AF1
-    dtype: float
-    default: 89.8e6
+-   id: af_list
+    label: AF List
+    dtype: float_vector
+    default: '89.8e6, 92.1e6'
     hide: ${ 'all' if not af else 'none' }
 -   id: tp
     label: TP
@@ -116,11 +116,12 @@ outputs:
 
 templates:
     imports: import rds
-    make: "rds.encoder(${pty_locale}, ${pty}, ${ms}, ${ps}, ${af}, ${af1},\n\t\t\t${tp},\
+    make: "rds.encoder(${pty_locale}, ${pty}, ${ms}, ${ps}, ${af}, [${af_list}],\n\t\t\t${tp},\
         \ ${ta}, ${tmc}, ${ct}, ${pi_country_code}, ${pi_coverage_area},\n\t\t\t${pi_reference_number},\
         \ ${radiotext}, ${ecc}, ${ ecc_code if ecc else 0 })\n\t"
     callbacks:
     - set_ps(${ps})
+    - set_af_list([${af_list}])
 
 documentation: |-
     PTY: Program Type (depending on PTY locale)

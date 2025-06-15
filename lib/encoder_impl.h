@@ -21,6 +21,7 @@
 #include <rds/encoder.h>
 #include <gnuradio/thread/thread.h>
 #include <time.h>
+#include <vector>
 
 namespace gr {
 namespace rds {
@@ -29,11 +30,12 @@ class encoder_impl : public encoder
 {
 public:
 	encoder_impl(unsigned char pty_locale, int pty, bool ms, std::string ps,
-                 bool af, double af1, bool tp, bool ta, bool tmc, bool ct,
+                 bool af, const std::vector<double>& af_list, bool tp, bool ta, bool tmc, bool ct,
                  int pi_country_code, int pi_coverage_area, int pi_reference_number,
                  std::string radiotext, bool ecc, unsigned char ecc_code);
 
     void set_ps(std::string ps) override;
+    void set_af_list(const std::vector<double>& af_list) override;
 
 private:
 	~encoder_impl() override;
@@ -46,7 +48,6 @@ private:
 	void set_ms(bool ms);
 	void set_tp(bool tp);
 	void set_ta(bool ta);
-	void set_af1(double af1);
 	void set_pty(unsigned int pty);
 	void set_pi(unsigned int pty);
 	void set_radiotext(std::string text);
@@ -72,7 +73,7 @@ private:
 	unsigned char   d_pty_locale;
 	unsigned int    d_pi;
 	unsigned char   d_pty;
-	double          d_af1;
+	std::vector<double> d_af_list;
 	unsigned char   d_ecc_code;
 
 	// Feature-Enabling Flags
@@ -101,6 +102,7 @@ private:
 	int d_ps_segment_index;
 	int d_radiotext_segment_index;
 	int d_tmc_segment_index;
+	int d_af_index;
 
 	// Streaming counters
 	int    d_current_buffer;
