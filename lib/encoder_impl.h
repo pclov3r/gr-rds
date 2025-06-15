@@ -53,11 +53,12 @@ private:
 	void set_radiotext(std::string text);
 	void count_groups();
 	void create_group(const int, const bool);
+   	void generate_ct_group();
 	void prepare_group0(const bool);
 	void prepare_group1a();
 	void prepare_group2(const bool);
 	void prepare_group3a();
-	void prepare_group4a();
+	void prepare_group4a(const time_t& time_to_encode);
 	void prepare_group8a();
 	void prepare_group11a();
 	void prepare_buffer(int);
@@ -86,35 +87,39 @@ private:
 	bool d_ecc;
 
 	// Data Buffers
-	unsigned char d_radiotext[64];
-	unsigned char d_ps[8];
+	char d_radiotext[64]; // Using char is more standard for strings
+	char d_ps[8];
 
 	// Internal State & Buffers
 	unsigned int  d_infoword[4];
 	unsigned int  d_checkword[4];
-	unsigned int  d_block[4];
+	unsigned long d_block[4]; // Using unsigned long is safer for 26-bit values
 	unsigned char **d_buffer;
-	char*         d_is_group4a;
 	int           d_nbuffers;
-	int           d_groups[32];
+	char          d_groups[32]; // Using char is sufficient for 0/1 flags
 
 	// Message Segment Counters
-	int d_ps_segment_index;
-	int d_radiotext_segment_index;
-	int d_tmc_segment_index;
-	int d_af_index;
+	unsigned int d_ps_segment_index;
+	unsigned int d_radiotext_segment_index;
+	unsigned int d_tmc_segment_index;
+	unsigned int d_af_index;
 
 	// Streaming counters
 	int    d_current_buffer;
 	int    d_buffer_bit_counter;
 	time_t d_last_ct_time;
 
+    // State variables for the correct "injection" logic
+    bool d_send_ct_next;
+    bool d_is_sending_ct;
+    unsigned char d_ct_buffer[104];
+
 	// RDS-TMC Alert-C Data
 	struct TmcAlertData {
-		int duration_persistence;
-		int extent;
-		int event_code;
-		int location_code;
+		unsigned char duration_persistence;
+		unsigned char extent;
+		unsigned int event_code;
+		unsigned int location_code;
 	};
 	TmcAlertData d_tmc_alert_data;
 };

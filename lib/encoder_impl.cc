@@ -56,7 +56,6 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::stri
 
       // Internal State
       d_buffer(nullptr),
-      d_is_group4a(nullptr),
       d_nbuffers(0),
       d_ps_segment_index(0),
       d_radiotext_segment_index(0),
@@ -65,6 +64,10 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::stri
       d_current_buffer(0),
       d_buffer_bit_counter(0),
       d_last_ct_time(0),
+
+      // State for Clock-Time (CT) group injection
+      d_send_ct_next(false),
+      d_is_sending_ct(false),
 
       // Hard-coded TMC Data
       d_tmc_alert_data({3, 2, 1340, 11023})
@@ -77,6 +80,7 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::stri
 	std::memset(d_groups,      0, sizeof(d_groups));
     std::memset(d_radiotext,   ' ', sizeof(d_radiotext));
     std::memset(d_ps,          ' ', sizeof(d_ps));
+    std::memset(d_ct_buffer,   0, sizeof(d_ct_buffer));
 
 	if (pi_country_code == 0) {
 		d_pi = pi_reference_number;
@@ -91,9 +95,9 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::stri
 	d_groups[0] = 1;  // basic tuning and switching
 	d_groups[2] = 1;  // radio text
 	d_groups[11] = 1; // Open Data Applications (in-house)
-    if (d_ecc) { d_groups[1] = 1; } // Extended Country Code
-    if (d_ct)  { d_groups[4] = 1; } // clock time
-    if (d_tmc) {                  // tmc
+    if (d_ecc) { d_groups[1] = 1; }
+    // NOTE: Group 4 (CT) is NOT enabled in d_groups. It's handled entirely by the d_ct flag and injection logic.
+    if (d_tmc) {
         d_groups[3] = 1; // announce TMC
         d_groups[8] = 1;
     }
@@ -108,7 +112,6 @@ encoder_impl::~encoder_impl() {
         }
         free(d_buffer);
     }
-    free(d_is_group4a);
 }
 
 void encoder_impl::rebuild() {
@@ -121,45 +124,36 @@ void encoder_impl::rebuild() {
         free(d_buffer);
         d_buffer = nullptr;
     }
-    free(d_is_group4a);
-    d_is_group4a = nullptr;
 
 	count_groups();
 	d_current_buffer = 0;
     d_af_index = 0;
-    d_last_ct_time = 0; // Reset last update time on rebuild
+    d_last_ct_time = 0;
 
 	// allocate memory for nbuffers buffers of 104 unsigned chars each
 	d_buffer = (unsigned char **)malloc(d_nbuffers * sizeof(unsigned char *));
-    d_is_group4a = (char *)malloc(d_nbuffers * sizeof(char));
-    std::memset(d_is_group4a, 0, d_nbuffers * sizeof(char));
-
 	for(int i = 0; i < d_nbuffers; i++) {
 		d_buffer[i] = (unsigned char *)malloc(104 * sizeof(unsigned char));
-		for(int j = 0; j < 104; j++) d_buffer[i][j] = 0;
+		std::memset(d_buffer[i], 0, 104 * sizeof(unsigned char));
 	}
 
 	// prepare each of the groups
 	for(int i = 0; i < 32; i++) {
 		if(d_groups[i] == 1) {
             int group_type = i % 16;
+
+            // This check prevents the memory corruption bug.
+            // It ensures the rebuild loop and count_groups are in sync by skipping CT group creation.
+            if (group_type == 4) continue;
+
             bool ab_flag = (i >= 16);
-
-            // Mark the buffer if it is for Group 4A before creating it
-            if (group_type == 4) {
-                d_is_group4a[d_current_buffer] = 1;
-            }
-
 			create_group(group_type, ab_flag);
-			if(group_type == 0)
-				for(int j = 0; j < 3; j++) create_group(group_type, ab_flag);
-			if(group_type == 2)
-				for(int j = 0; j < 15; j++) create_group(group_type, ab_flag);
-			if(group_type == 3)
-				create_group(group_type, ab_flag);
+            d_current_buffer++;
+			if(group_type == 0) for(int j = 0; j < 3; j++) { create_group(group_type, ab_flag); d_current_buffer++; }
+			if(group_type == 2) for(int j = 0; j < 15; j++) { create_group(group_type, ab_flag); d_current_buffer++; }
+			if(group_type == 3) { create_group(group_type, ab_flag); d_current_buffer++; }
 		}
 	}
-
 	d_current_buffer = 0;
 }
 
@@ -265,6 +259,8 @@ unsigned int encoder_impl::encode_af(const double af) {
 void encoder_impl::count_groups(void) {
 	d_nbuffers = 0;
 	for(int i = 0; i < 32; i++) {
+        // Skip Group 4A (CT) as it's not part of the regular repeating sequence.
+        if (i % 16 == 4) continue;
 		if(d_groups[i] == 1) {
 			if(i % 16 == 0) d_nbuffers += 4;
 			else if(i % 16 == 2) d_nbuffers += 16;
@@ -284,7 +280,7 @@ void encoder_impl::create_group(const int group_type, const bool AB) {
 	else if(group_type == 1) prepare_group1a();
 	else if(group_type == 2) prepare_group2(AB);
 	else if(group_type == 3) prepare_group3a();
-	else if(group_type == 4) prepare_group4a();
+	// Group 4A is no longer prepared here. It is injected by the work() function.
 	else if(group_type == 8) prepare_group8a();
 	else if(group_type == 11) prepare_group11a();
 
@@ -297,7 +293,6 @@ void encoder_impl::create_group(const int group_type, const bool AB) {
 	}
 
 	prepare_buffer(d_current_buffer);
-	d_current_buffer++;
 }
 
 void encoder_impl::prepare_group0(const bool AB) {
@@ -357,42 +352,31 @@ void encoder_impl::prepare_group3a(void) {
 	d_tmc_segment_index = (d_tmc_segment_index + 1) % 2;
 }
 
-/*
- * Implementation of group4a based on NRSC-4-B standard.
- * See page 14, Figure 20 of NRSC-4-B, April 2011. */
-void encoder_impl::prepare_group4a(void) {
-	time_t rightnow;
-	time(&rightnow);
-
-    // Use re-entrant `_r`/`_s` functions to prevent static buffer overwrite from gmtime/localtime.
+void encoder_impl::prepare_group4a(const time_t& time_to_encode) {
     tm utc_struct;
     tm local_struct;
     #if defined(_WIN32)
-        gmtime_s(&utc_struct, &rightnow);
-        localtime_s(&local_struct, &rightnow);
-    #else // POSIX (Linux, macOS, etc.)
-        gmtime_r(&rightnow, &utc_struct);
-        localtime_r(&rightnow, &local_struct);
+        gmtime_s(&utc_struct, &time_to_encode);
+        localtime_s(&local_struct, &time_to_encode);
+    #else // POSIX
+        gmtime_r(&time_to_encode, &utc_struct);
+        localtime_r(&time_to_encode, &local_struct);
     #endif
 
-	// Get UTC time components from our safe buffer.
 	int minute = utc_struct.tm_min;
 	int hour = utc_struct.tm_hour;
 	int day = utc_struct.tm_mday;
 	int month = utc_struct.tm_mon + 1;
 	int year = utc_struct.tm_year + 1900;
 
-	// Calculate MJD using a standard integer algorithm (Gregorian to JDN).
     int a = (14 - month) / 12;
     int y = year + 4800 - a;
     int m_calc = month + 12 * a - 3;
     int jdn = day + (153 * m_calc + 2) / 5 + 365 * y + y / 4 - y / 100 + y / 400 - 32045;
-    int mjd = jdn - 2400001; // Convert JDN to MJD
+    int mjd = jdn - 2400001;
 
-	// Calculate local time offset portably.
     long offset_secs = 0;
     #if defined(_WIN32)
-        // Windows: _get_timezone is seconds WEST of UTC.
         long timezone_sec = 0;
         _get_timezone(&timezone_sec);
         offset_secs = -timezone_sec;
@@ -402,7 +386,6 @@ void encoder_impl::prepare_group4a(void) {
             offset_secs += dst_sec;
         }
     #else
-        // POSIX: tm_gmtoff is seconds EAST of UTC.
         offset_secs = local_struct.tm_gmtoff;
     #endif
 
@@ -411,10 +394,9 @@ void encoder_impl::prepare_group4a(void) {
     unsigned int offset_magnitude = (unsigned int)fabs(offset_in_half_hours);
     unsigned int offset_code = (offset_sign_bit << 5) | (offset_magnitude & 0x1F);
 
-    // Pack data using the original, proven bit-packing structure.
 	d_infoword[1] |= ((mjd >> 15) & 0x3);
 	d_infoword[2] = (((mjd >> 7) & 0xff) << 8) | ((mjd & 0x7f) << 1) | ((hour >> 4) & 0x1);
-	d_infoword[3] = ((hour & 0xf) << 12) | (((minute >> 2) & 0xf) << 8) | ((minute & 0x3) << 6) | (offset_code & 0x3F);
+	d_infoword[3] = ((hour & 0xf) << 12) | (minute << 6) | (offset_code & 0x3F);
 }
 
 // TMC Alert-C
@@ -439,6 +421,34 @@ void encoder_impl::prepare_buffer(int which) {
 	}
 }
 
+// Helper function to generate the CT group into its dedicated buffer
+void encoder_impl::generate_ct_group() {
+    time_t now;
+    time(&now);
+    // Proactively encode the time for the *next* minute to compensate for system latency.
+    time_t time_for_next_minute = now + 60;
+
+    const int group_type = 4;
+    const bool AB = false;
+    d_infoword[0] = d_pi;
+    d_infoword[1] = (((group_type & 0xf) << 12) | (AB << 11) | (d_tp << 10) | (d_pty << 5));
+    prepare_group4a(time_for_next_minute);
+
+    for(int k = 0; k < 4; k++) {
+        d_checkword[k] = calc_syndrome(d_infoword[k], 16);
+        d_block[k] = ((d_infoword[k] & 0xffff) << 10) | (d_checkword[k] & 0x3ff);
+        if((k == 2) && AB) d_block[k] ^= offset_word[4];
+        else d_block[k] ^= offset_word[k];
+    }
+
+    // Populate the dedicated CT buffer instead of the main d_buffer
+	for(int q = 0; q < 104; q++) {
+		int a = q / 26;
+		int b = 25 - (q % 26);
+		d_ct_buffer[q] = (unsigned char)(d_block[a] >> b) & 0x1;
+	}
+}
+
 //////////////////////// WORK ////////////////////////////////////
 int encoder_impl::work (int noutput_items,
 		gr_vector_const_void_star &input_items,
@@ -447,41 +457,50 @@ int encoder_impl::work (int noutput_items,
 	gr::thread::scoped_lock lock(d_mutex);
 	unsigned char *out = (unsigned char *) output_items[0];
 
+    // Check if it's time to schedule a CT group transmission
+    if (d_ct && !d_send_ct_next && !d_is_sending_ct) {
+        time_t now;
+        time(&now);
+        if ((now / 60) != (d_last_ct_time / 60)) {
+            d_last_ct_time = now;
+            d_send_ct_next = true;
+        }
+    }
+
 	for(int i = 0; i < noutput_items; i++) {
-        // At the start of a new group, check if it's a dynamic time group
-        if (d_buffer_bit_counter == 0 && d_nbuffers > 0 && d_ct && d_is_group4a[d_current_buffer]) {
-            time_t now;
-            time(&now);
-            // Update time only once per minute (at the top of the minute)
-            if ((now / 60) != (d_last_ct_time / 60)) {
-                d_last_ct_time = now;
-                // Regenerate this specific group's data.
-                const int group_type = 4;
-                const bool AB = false;
-                // 1. Prepare infowords with current time
-                d_infoword[0] = d_pi;
-                d_infoword[1] = (((group_type & 0xf) << 12) | (AB << 11) | (d_tp << 10) | (d_pty << 5));
-                prepare_group4a();
-                // 2. Calculate checkwords and blocks
-                for(int k = 0; k < 4; k++) {
-                    d_checkword[k] = calc_syndrome(d_infoword[k], 16);
-                    d_block[k] = ((d_infoword[k] & 0xffff) << 10) | (d_checkword[k] & 0x3ff);
-                    if((k == 2) && AB) d_block[k] ^= offset_word[4];
-                    else d_block[k] ^= offset_word[k];
-                }
-                // 3. Populate the buffer for the current group
-                prepare_buffer(d_current_buffer);
+        // At the start of a new group, decide if we need to inject a CT group
+        if (d_buffer_bit_counter == 0) {
+            if (d_send_ct_next) {
+                generate_ct_group();
+                d_is_sending_ct = true;
+                d_send_ct_next = false;
             }
         }
 
-		out[i] = d_buffer[d_current_buffer][d_buffer_bit_counter];
+        // Output the bit from the correct buffer (either normal or CT)
+        if (d_is_sending_ct) {
+            out[i] = d_ct_buffer[d_buffer_bit_counter];
+        } else {
+            // Protect against d_nbuffers being zero
+            if (d_nbuffers > 0) {
+                out[i] = d_buffer[d_current_buffer][d_buffer_bit_counter];
+            } else {
+                out[i] = 0; // Output zeros if no groups are configured
+            }
+        }
+
+        // Advance counters
 		if(++d_buffer_bit_counter > 103) {
 			d_buffer_bit_counter = 0;
-            // Protect against division by zero if no buffers are configured
-			if (d_nbuffers > 0) {
-			    d_current_buffer = (d_current_buffer + 1) % d_nbuffers;
+            if (d_is_sending_ct) {
+                // We just finished sending the special CT group
+                d_is_sending_ct = false;
+                // Do NOT advance d_current_buffer, so we resume the normal sequence
             } else {
-                d_current_buffer = 0;
+                // We finished a normal group, advance the main sequence
+                if (d_nbuffers > 0) {
+                    d_current_buffer = (d_current_buffer + 1) % d_nbuffers;
+                }
             }
 		}
 	}
