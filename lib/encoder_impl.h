@@ -28,12 +28,21 @@ namespace rds {
 
 class encoder_impl : public encoder
 {
+private:
+    // This struct holds the dynamic state for the mpx-gen style scheduler.
+    // Each of the 32 possible RDS groups (0A-15B) has one of these.
+    struct GroupSchedulerState {
+        int rate;    // The repetition interval (e.g., 4 means "send every ~4 slots").
+        int counter; // Tracks how "overdue" the group is for transmission.
+    };
+
 public:
 	encoder_impl(unsigned char pty_locale, int pty, bool ms, std::string ps,
                  bool af, const std::vector<double>& af_list, bool tp, bool ta, bool tmc, bool ct,
                  int pi_country_code, int pi_coverage_area, int pi_reference_number,
                  std::string radiotext, bool ecc, unsigned char ecc_code);
 
+    // Public API functions remain unchanged
     void set_ps(std::string ps) override;
     void set_af_list(const std::vector<double>& af_list) override;
 
@@ -51,9 +60,7 @@ private:
 	void set_pty(unsigned int pty);
 	void set_pi(unsigned int pty);
 	void set_radiotext(std::string text);
-	void count_groups();
 	void create_group(const int, const bool);
-   	void generate_ct_group();
 	void prepare_group0(const bool);
 	void prepare_group1a();
 	void prepare_group2(const bool);
@@ -61,7 +68,7 @@ private:
 	void prepare_group4a(const time_t& time_to_encode);
 	void prepare_group8a();
 	void prepare_group11a();
-	void prepare_buffer(int);
+	void prepare_buffer(); // Modified: no longer needs an argument
 	unsigned int encode_af(double);
 	unsigned int calc_syndrome(unsigned long, unsigned char);
 	void rds_in(pmt::pmt_t msg);
@@ -87,16 +94,14 @@ private:
 	bool d_ecc;
 
 	// Data Buffers
-	char d_radiotext[64]; // Using char is more standard for strings
+	char d_radiotext[64];
 	char d_ps[8];
 
-	// Internal State & Buffers
+	// Internal State for Group Generation
 	unsigned int  d_infoword[4];
 	unsigned int  d_checkword[4];
-	unsigned long d_block[4]; // Using unsigned long is safer for 26-bit values
-	unsigned char **d_buffer;
-	int           d_nbuffers;
-	char          d_groups[32]; // Using char is sufficient for 0/1 flags
+	unsigned long d_block[4];
+	char          d_groups[32]; // Still used to know which groups are enabled by the user
 
 	// Message Segment Counters
 	unsigned int d_ps_segment_index;
@@ -104,15 +109,13 @@ private:
 	unsigned int d_tmc_segment_index;
 	unsigned int d_af_index;
 
+	// State for Dynamic Scheduler ---
+    GroupSchedulerState d_scheduler_states[32];
+    unsigned char d_current_group_buffer[104];
+
 	// Streaming counters
-	int    d_current_buffer;
 	int    d_buffer_bit_counter;
 	time_t d_last_ct_time;
-
-    // State variables for the correct "injection" logic
-    bool d_send_ct_next;
-    bool d_is_sending_ct;
-    unsigned char d_ct_buffer[104];
 
 	// RDS-TMC Alert-C Data
 	struct TmcAlertData {

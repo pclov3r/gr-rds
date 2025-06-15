@@ -29,8 +29,39 @@
 #include <cstdio>
 #include <iostream>
 #include <vector>
+#include <limits>
 
 using namespace gr::rds;
+
+// Default group repetition intervals, modeled on the mpx-gen/MiniRDS scheduler.
+// The 'rate' parameter defines the approximate interval, in group slots, at which
+// a group should be transmitted. A lower rate corresponds to a higher transmission frequency.
+//
+// RDS TIMING: The standard group rate is ~11.4 groups/sec (~87.5 ms per group).
+// A group's approximate repetition frequency can be calculated as: (11.4 / rate) Hz.
+//
+// IMPORTANT: Rates for unimplemented groups are set to 0 to disable them. The
+// original mpx-gen/MiniRDS scheduler rate is kept in a comment to guide future implementation.
+//
+// See mpx-gen/MiniRDS at https://github.com/Anthony96922/MiniRDS
+const int DEFAULT_GROUP_RATES[16] = {
+	4,   // Group 0A/0B (PS, AF): High repetition (~2.85 Hz)
+	16,  // Group 1A (ECC): Low repetition (~0.71 Hz)
+	8,   // Group 2A/2B (RadioText): Medium repetition (~1.42 Hz)
+	16,  // Group 3A (ODA): Low repetition (~0.71 Hz)
+	-1,  // Group 4A (Clock-Time): Special case, sent once per minute.
+	0,   // Group 5: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
+	0,   // Group 6: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
+	0,   // Group 7: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
+	16,  // Group 8A (TMC/ODA): Low repetition (~0.71 Hz)
+	0,   // Group 9: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
+	0,   // Group 10: Not Implemented (mpxgen rate: 16, ~0.71 Hz)
+	16,  // Group 11A (ODA): Low repetition (~0.71 Hz)
+	0,   // Group 12: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
+	0,   // Group 13: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
+	0,   // Group 14: Not Implemented (mpxgen rate: 4, ~2.85 Hz)
+	0    // Group 15: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
+};
 
 encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::string ps,
                            bool af, const std::vector<double>& af_list, bool tp, bool ta, bool tmc, bool ct,
@@ -55,19 +86,12 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::stri
       d_ecc(ecc),                 // Enable sending Extended Country Code group
 
       // Internal State
-      d_buffer(nullptr),
-      d_nbuffers(0),
       d_ps_segment_index(0),
       d_radiotext_segment_index(0),
       d_tmc_segment_index(0),
       d_af_index(0),
-      d_current_buffer(0),
       d_buffer_bit_counter(0),
       d_last_ct_time(0),
-
-      // State for Clock-Time (CT) group injection
-      d_send_ct_next(false),
-      d_is_sending_ct(false),
 
       // Hard-coded TMC Data
       d_tmc_alert_data({3, 2, 1340, 11023})
@@ -80,7 +104,7 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::stri
 	std::memset(d_groups,      0, sizeof(d_groups));
     std::memset(d_radiotext,   ' ', sizeof(d_radiotext));
     std::memset(d_ps,          ' ', sizeof(d_ps));
-    std::memset(d_ct_buffer,   0, sizeof(d_ct_buffer));
+    std::memset(d_current_group_buffer, 0, sizeof(d_current_group_buffer));
 
 	if (pi_country_code == 0) {
 		d_pi = pi_reference_number;
@@ -92,69 +116,55 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::stri
 	set_ps(ps);
 
 	// Configure which groups are set based on flags
-	d_groups[0] = 1;  // basic tuning and switching
-	d_groups[2] = 1;  // radio text
-	d_groups[11] = 1; // Open Data Applications (in-house)
-    if (d_ecc) { d_groups[1] = 1; }
-    // NOTE: Group 4 (CT) is NOT enabled in d_groups. It's handled entirely by the d_ct flag and injection logic.
+	d_groups[0] = 1;  // 0A: basic tuning and switching
+	d_groups[2] = 1;  // 2A: radio text
+	d_groups[11] = 1; // 11A: Open Data Applications (in-house)
+    if (d_ecc) { d_groups[1] = 1; } // 1A
     if (d_tmc) {
-        d_groups[3] = 1; // announce TMC
-        d_groups[8] = 1;
+        d_groups[3] = 1; // 3A: announce TMC
+        d_groups[8] = 1; // 8A: TMC data
     }
 
     rebuild();
 }
 
 encoder_impl::~encoder_impl() {
-    if (d_buffer) {
-        for(int i = 0; i < d_nbuffers; i++) {
-            free(d_buffer[i]);
-        }
-        free(d_buffer);
-    }
 }
 
+// Configures the dynamic scheduler based on currently enabled groups.
+// This function is invoked on initialization and upon runtime parameter changes.
+//
+// It populates the scheduler state for each potential group (0A-15B) with its
+// configured rate. The counter for each group is initialized to its rate - 1.
+// This specific initialization is critical as it ensures that upon startup,
+// all enabled groups are considered "urgent" and are transmitted once in a balanced
+// sequence before the regular scheduling cadence begins.
 void encoder_impl::rebuild() {
-	gr::thread::scoped_lock lock(d_mutex);
+    gr::thread::scoped_lock lock(d_mutex);
 
-    if (d_buffer) {
-        for(int i = 0; i < d_nbuffers; i++) {
-            free(d_buffer[i]);
-        }
-        free(d_buffer);
-        d_buffer = nullptr;
-    }
-
-	count_groups();
-	d_current_buffer = 0;
-    d_af_index = 0;
+    // Reset transmission state
+    d_buffer_bit_counter = 0;
     d_last_ct_time = 0;
+    d_ps_segment_index = 0;
+    d_radiotext_segment_index = 0;
+    d_tmc_segment_index = 0;
+    d_af_index = 0;
 
-	// allocate memory for nbuffers buffers of 104 unsigned chars each
-	d_buffer = (unsigned char **)malloc(d_nbuffers * sizeof(unsigned char *));
-	for(int i = 0; i < d_nbuffers; i++) {
-		d_buffer[i] = (unsigned char *)malloc(104 * sizeof(unsigned char));
-		std::memset(d_buffer[i], 0, 104 * sizeof(unsigned char));
-	}
-
-	// prepare each of the groups
-	for(int i = 0; i < 32; i++) {
-		if(d_groups[i] == 1) {
+    // Configure the scheduler state for all 32 possible groups
+    for (int i = 0; i < 32; i++) {
+        if (d_groups[i]) {
             int group_type = i % 16;
-
-            // This check prevents the memory corruption bug.
-            // It ensures the rebuild loop and count_groups are in sync by skipping CT group creation.
-            if (group_type == 4) continue;
-
-            bool ab_flag = (i >= 16);
-			create_group(group_type, ab_flag);
-            d_current_buffer++;
-			if(group_type == 0) for(int j = 0; j < 3; j++) { create_group(group_type, ab_flag); d_current_buffer++; }
-			if(group_type == 2) for(int j = 0; j < 15; j++) { create_group(group_type, ab_flag); d_current_buffer++; }
-			if(group_type == 3) { create_group(group_type, ab_flag); d_current_buffer++; }
-		}
-	}
-	d_current_buffer = 0;
+            d_scheduler_states[i].rate = DEFAULT_GROUP_RATES[group_type];
+            if (d_scheduler_states[i].rate > 0) {
+                d_scheduler_states[i].counter = d_scheduler_states[i].rate - 1;
+            } else {
+                d_scheduler_states[i].counter = 0;
+            }
+        } else {
+            d_scheduler_states[i].rate = 0; // A rate of 0 disables the group from scheduling.
+            d_scheduler_states[i].counter = 0;
+        }
+    }
 }
 
 void encoder_impl::rds_in(pmt::pmt_t msg) {
@@ -243,8 +253,10 @@ unsigned int encoder_impl::calc_syndrome(unsigned long message, unsigned char ml
 	return reg & ((1 << plen) - 1);
 }
 
-/* see page 41 in the standard; this is an implementation of AF method A
- * FIXME need to add code that declares the number of AF to follow... */
+/*
+ * Encodes a frequency value (in MHz) into its corresponding 8-bit RDS AF code.
+ * This implementation follows the specification for AF Method A, which is
+ * detailed in the RDS standard IEC 62106-2:2018, Annex E, Table E.1. */
 unsigned int encoder_impl::encode_af(const double af) {
 	unsigned int af_code = 0;
 	if(( af >= 87.6) && (af <= 107.9))
@@ -254,20 +266,6 @@ unsigned int encoder_impl::encode_af(const double af) {
 	else if((af >= 531) && (af <= 1602))
 		af_code = nearbyint((af - 531) / 9 + 16);
 	return af_code;
-}
-
-void encoder_impl::count_groups(void) {
-	d_nbuffers = 0;
-	for(int i = 0; i < 32; i++) {
-        // Skip Group 4A (CT) as it's not part of the regular repeating sequence.
-        if (i % 16 == 4) continue;
-		if(d_groups[i] == 1) {
-			if(i % 16 == 0) d_nbuffers += 4;
-			else if(i % 16 == 2) d_nbuffers += 16;
-			else if(i % 16 == 3) d_nbuffers += 2;
-			else d_nbuffers++;
-		}
-	}
 }
 
 /* create the 4 infowords, according to group type.
@@ -280,7 +278,7 @@ void encoder_impl::create_group(const int group_type, const bool AB) {
 	else if(group_type == 1) prepare_group1a();
 	else if(group_type == 2) prepare_group2(AB);
 	else if(group_type == 3) prepare_group3a();
-	// Group 4A is no longer prepared here. It is injected by the work() function.
+	else if(group_type == 4) prepare_group4a(time(NULL) + 60);
 	else if(group_type == 8) prepare_group8a();
 	else if(group_type == 11) prepare_group11a();
 
@@ -292,7 +290,7 @@ void encoder_impl::create_group(const int group_type, const bool AB) {
 		else d_block[i] ^= offset_word[i];
 	}
 
-	prepare_buffer(d_current_buffer);
+	prepare_buffer();
 }
 
 void encoder_impl::prepare_group0(const bool AB) {
@@ -413,43 +411,23 @@ void encoder_impl::prepare_group11a(void) {
 	d_infoword[3] = 0x4456;
 }
 
-void encoder_impl::prepare_buffer(int which) {
+void encoder_impl::prepare_buffer() {
 	for(int q = 0; q < 104; q++) {
 		int a = q / 26;
 		int b = 25 - (q % 26);
-		d_buffer[which][q] = (unsigned char)(d_block[a] >> b) & 0x1;
+		d_current_group_buffer[q] = (unsigned char)(d_block[a] >> b) & 0x1;
 	}
 }
 
-// Helper function to generate the CT group into its dedicated buffer
-void encoder_impl::generate_ct_group() {
-    time_t now;
-    time(&now);
-    // Proactively encode the time for the *next* minute to compensate for system latency.
-    time_t time_for_next_minute = now + 60;
-
-    const int group_type = 4;
-    const bool AB = false;
-    d_infoword[0] = d_pi;
-    d_infoword[1] = (((group_type & 0xf) << 12) | (AB << 11) | (d_tp << 10) | (d_pty << 5));
-    prepare_group4a(time_for_next_minute);
-
-    for(int k = 0; k < 4; k++) {
-        d_checkword[k] = calc_syndrome(d_infoword[k], 16);
-        d_block[k] = ((d_infoword[k] & 0xffff) << 10) | (d_checkword[k] & 0x3ff);
-        if((k == 2) && AB) d_block[k] ^= offset_word[4];
-        else d_block[k] ^= offset_word[k];
-    }
-
-    // Populate the dedicated CT buffer instead of the main d_buffer
-	for(int q = 0; q < 104; q++) {
-		int a = q / 26;
-		int b = 25 - (q % 26);
-		d_ct_buffer[q] = (unsigned char)(d_block[a] >> b) & 0x1;
-	}
-}
-
-//////////////////////// WORK ////////////////////////////////////
+// Main processing loop implementing the dynamic RDS group scheduler.
+// At the beginning of each 104-bit group slot, this function determines which
+// RDS group to transmit next based on a two-stage process:
+// 1. High-Priority Injection: Checks for time-critical groups (e.g., Group 4A).
+// 2. Urgency-Based Scheduling: If no high-priority group is due, it selects the
+//    regular group with the highest "urgency" score.
+//
+// Once a group is selected, its bitstream is generated into a buffer, and the
+// scheduler's internal state is updated for the next cycle.
 int encoder_impl::work (int noutput_items,
 		gr_vector_const_void_star &input_items,
 		gr_vector_void_star &output_items) {
@@ -457,51 +435,82 @@ int encoder_impl::work (int noutput_items,
 	gr::thread::scoped_lock lock(d_mutex);
 	unsigned char *out = (unsigned char *) output_items[0];
 
-    // Check if it's time to schedule a CT group transmission
-    if (d_ct && !d_send_ct_next && !d_is_sending_ct) {
-        time_t now;
-        time(&now);
-        if ((now / 60) != (d_last_ct_time / 60)) {
-            d_last_ct_time = now;
-            d_send_ct_next = true;
-        }
-    }
-
 	for(int i = 0; i < noutput_items; i++) {
-        // At the start of a new group, decide if we need to inject a CT group
+        // A new group must be scheduled and generated at the start of each 104-bit block.
         if (d_buffer_bit_counter == 0) {
-            if (d_send_ct_next) {
-                generate_ct_group();
-                d_is_sending_ct = true;
-                d_send_ct_next = false;
-            }
-        }
+            int group_to_send = -1;
+            bool ab_flag_to_send = false;
+            int chosen_idx = -1;
 
-        // Output the bit from the correct buffer (either normal or CT)
-        if (d_is_sending_ct) {
-            out[i] = d_ct_buffer[d_buffer_bit_counter];
-        } else {
-            // Protect against d_nbuffers being zero
-            if (d_nbuffers > 0) {
-                out[i] = d_buffer[d_current_buffer][d_buffer_bit_counter];
-            } else {
-                out[i] = 0; // Output zeros if no groups are configured
+            // 1. High-Priority Override: Check for time-sensitive groups.
+            // Group 4A (Clock-Time) is injected once per minute, overriding the regular schedule.
+	    // NOTE: Due to significant buffering throughout the signal chain (GNU Radio, OS, SDR hardware),
+	    // the actual transmission of this group will be noticeably delayed relative to the top of the minute.
+	    // The `prepare_group4a` function attempts to compensate for this by encoding the time
+	    // for the *upcoming* minute.
+            time_t now;
+            time(&now);
+            if (d_ct && (now / 60) != (d_last_ct_time / 60)) {
+                d_last_ct_time = now;
+                group_to_send = 4;
+                ab_flag_to_send = false; // Group 4A
             }
-        }
 
-        // Advance counters
-		if(++d_buffer_bit_counter > 103) {
-			d_buffer_bit_counter = 0;
-            if (d_is_sending_ct) {
-                // We just finished sending the special CT group
-                d_is_sending_ct = false;
-                // Do NOT advance d_current_buffer, so we resume the normal sequence
-            } else {
-                // We finished a normal group, advance the main sequence
-                if (d_nbuffers > 0) {
-                    d_current_buffer = (d_current_buffer + 1) % d_nbuffers;
+            // 2. Regular Scheduling: Find the most "urgent" group if no high-priority group was sent.
+            if (group_to_send == -1) {
+                // Initialize max_urgency to the lowest possible float value. This is the
+                // robust C++ way to find a maximum value and guarantees that the first
+                // valid group will always become the initial candidate, preventing a stall.
+                float max_urgency = std::numeric_limits<float>::lowest();
+
+                // The urgency is a ratio of the time since last transmission (counter)
+                // to the desired interval (rate). A higher ratio indicates higher urgency.
+                for (int j = 0; j < 32; j++) {
+                    if (d_scheduler_states[j].rate > 0) { // Check if group is schedulable
+                        float urgency = (float)d_scheduler_states[j].counter / (float)d_scheduler_states[j].rate;
+                        if (urgency > max_urgency) {
+                            max_urgency = urgency;
+                            chosen_idx = j;
+                        }
+                    }
+                }
+
+                if (chosen_idx != -1) {
+                    group_to_send = chosen_idx % 16;
+                    ab_flag_to_send = (chosen_idx >= 16);
                 }
             }
+
+            // 3. Generate the bitstream for the chosen group.
+            if (group_to_send != -1) {
+                create_group(group_to_send, ab_flag_to_send);
+            } else {
+                // Failsafe: If no group is schedulable, transmit a null group.
+                std::memset(d_current_group_buffer, 0, sizeof(d_current_group_buffer));
+            }
+
+            // 4. Update Scheduler State. This is the core of the mpx-gen algorithm.
+            if (chosen_idx != -1) { // Only update counters if a regular group was chosen.
+                for (int j = 0; j < 32; j++) {
+                    if (d_scheduler_states[j].rate > 0) { // If group is enabled
+                        if (j == chosen_idx) {
+                            // The chosen group has its urgency "paid off".
+                            d_scheduler_states[j].counter -= d_scheduler_states[j].rate;
+                        } else {
+                            // All other groups become slightly more urgent for the next slot.
+                            d_scheduler_states[j].counter++;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Output the next bit from the currently generated group.
+        out[i] = d_current_group_buffer[d_buffer_bit_counter];
+
+        // Advance the bit counter for the current 104-bit group.
+		if(++d_buffer_bit_counter > 103) {
+			d_buffer_bit_counter = 0; // Reset for the next group slot.
 		}
 	}
 
