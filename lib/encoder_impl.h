@@ -37,14 +37,16 @@ private:
     };
 
 public:
-	encoder_impl(unsigned char pty_locale, int pty, bool ms, std::string ps,
-                 bool af, const std::vector<double>& af_list, bool tp, bool ta, bool tmc, bool ct,
+	encoder_impl(unsigned char pty_locale, int pty, bool ptyn, std::string ptyn_str, bool ms,
+                 bool di_stereo, bool di_artificial_head, bool di_compressed, bool di_dynamic_pty,
+                 std::string ps, bool af, const std::vector<double>& af_list, bool tp, bool ta, bool tmc, bool ct,
                  int pi_country_code, int pi_coverage_area, int pi_reference_number,
                  std::string radiotext, bool ecc, unsigned char ecc_code);
 
-    // Public API functions remain unchanged
+    // Public API functions
     void set_ps(std::string ps) override;
     void set_af_list(const std::vector<double>& af_list) override;
+    void set_ptyn(std::string ptyn_str) override;
 
 private:
 	~encoder_impl() override;
@@ -60,6 +62,16 @@ private:
 	void set_pty(unsigned int pty);
 	void set_pi(unsigned int pty);
 	void set_radiotext(std::string text);
+   	void set_di_stereo(bool stereo);
+    	void set_di_artificial_head(bool artificial_head);
+    	void set_di_compressed(bool compressed);
+    	void set_di_dynamic_pty(bool dynamic_pty);
+    	void set_af_enabled(bool af);
+    	void set_ptyn_enabled(bool ptyn);
+    	void set_tmc_enabled(bool tmc);
+    	void set_ct_enabled(bool ct);
+    	void set_ecc_enabled(bool ecc);
+    	void set_ecc_code(unsigned char ecc_code);
 	void create_group(const int, const bool);
 	void prepare_group0(const bool);
 	void prepare_group1a();
@@ -67,55 +79,71 @@ private:
 	void prepare_group3a();
 	void prepare_group4a(const time_t& time_to_encode);
 	void prepare_group8a();
+    	void prepare_group10a();
 	void prepare_group11a();
-	void prepare_buffer(); // Modified: no longer needs an argument
+	void prepare_buffer();
 	unsigned int encode_af(double);
 	unsigned int calc_syndrome(unsigned long, unsigned char);
 	void rds_in(pmt::pmt_t msg);
 
 
 	// --- Member Variables ---
-
-	// RDS Configuration & Data
 	gr::thread::mutex d_mutex;
-	unsigned char   d_pty_locale;
+
+	// Core RDS Parameters
 	unsigned int    d_pi;
 	unsigned char   d_pty;
-	std::vector<double> d_af_list;
+	unsigned char   d_pty_locale;
 	unsigned char   d_ecc_code;
+	std::vector<double> d_af_list;
 
-	// Feature-Enabling Flags
+	// Dynamic Broadcast Flags
 	bool d_ms;
+
+	// Decoder Identification Flags
+    	bool d_di_stereo;
+    	bool d_di_artificial_head;
+    	bool d_di_compressed;
+    	bool d_di_dynamic_pty;
+
+	// Other Broadcast Flags
 	bool d_tp;
 	bool d_ta;
+
+	// Feature-Enable Flags
 	bool d_af;
 	bool d_tmc;
 	bool d_ct;
 	bool d_ecc;
+    	bool d_ptyn;
 
 	// Data Buffers
-	char d_radiotext[64];
 	char d_ps[8];
+	char d_radiotext[64];
+    	char d_ptyn_str[8];
 
 	// Internal State for Group Generation
 	unsigned int  d_infoword[4];
 	unsigned int  d_checkword[4];
 	unsigned long d_block[4];
-	char          d_groups[32]; // Still used to know which groups are enabled by the user
+	char          d_groups[32];
 
 	// Message Segment Counters
 	unsigned int d_ps_segment_index;
 	unsigned int d_radiotext_segment_index;
 	unsigned int d_tmc_segment_index;
 	unsigned int d_af_index;
+    	unsigned int d_ptyn_segment_index;
+    	bool         d_ptyn_ab_flag;
 
-	// State for Dynamic Scheduler ---
-    GroupSchedulerState d_scheduler_states[32];
-    unsigned char d_current_group_buffer[104];
+	// State for Dynamic Scheduler
+    	GroupSchedulerState d_scheduler_states[32];
+    	unsigned char d_current_group_buffer[104];
 
 	// Streaming counters
 	int    d_buffer_bit_counter;
 	time_t d_last_ct_time;
+    	bool   d_rebuild_needed; // Flag to signal a safe state reset is needed
 
 	// RDS-TMC Alert-C Data
 	struct TmcAlertData {

@@ -45,53 +45,63 @@ using namespace gr::rds;
 //
 // See mpx-gen/MiniRDS at https://github.com/Anthony96922/MiniRDS
 const int DEFAULT_GROUP_RATES[16] = {
-	4,   // Group 0A/0B (PS, AF): High repetition (~2.85 Hz)
-	16,  // Group 1A (ECC): Low repetition (~0.71 Hz)
-	8,   // Group 2A/2B (RadioText): Medium repetition (~1.42 Hz)
-	16,  // Group 3A (ODA): Low repetition (~0.71 Hz)
+	3,   // Group 0A/0B (PS, AF): High repetition. Rate of 3 (~3.8/sec) closely aligns with the NRSC/IEC recommendation of ~4/sec.
+	16,  // Group 1A (ECC): Low repetition.
+	4,   // Group 2A/2B (RadioText): Fast repetition. Rate of 4 (~2.85/sec) aligns with the NRSC/IEC example of ~3.2/sec.
+	16,  // Group 3A (ODA): Low repetition.
 	-1,  // Group 4A (Clock-Time): Special case, sent once per minute.
 	0,   // Group 5: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
 	0,   // Group 6: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
 	0,   // Group 7: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
-	16,  // Group 8A (TMC/ODA): Low repetition (~0.71 Hz)
+	16,  // Group 8A (TMC/ODA): Low repetition.
 	0,   // Group 9: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
-	0,   // Group 10: Not Implemented (mpxgen rate: 16, ~0.71 Hz)
-	16,  // Group 11A (ODA): Low repetition (~0.71 Hz)
+	16,  // Group 10A (PTYN): Balanced repetition rate.
+	0,   // Group 11A (ODA): Low repetition. Disabled for now (previous rate was 16)
 	0,   // Group 12: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
 	0,   // Group 13: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
 	0,   // Group 14: Not Implemented (mpxgen rate: 4, ~2.85 Hz)
 	0    // Group 15: Not Implemented (mpxgen rate: 32, ~0.36 Hz)
 };
-
-encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::string ps,
-                           bool af, const std::vector<double>& af_list, bool tp, bool ta, bool tmc, bool ct,
+encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ptyn, std::string ptyn_str, bool ms,
+                           bool di_stereo, bool di_artificial_head, bool di_compressed, bool di_dynamic_pty,
+                           std::string ps, bool af, const std::vector<double>& af_list, bool tp, bool ta, bool tmc, bool ct,
                            int pi_country_code, int pi_coverage_area, int pi_reference_number,
                            std::string radiotext, bool ecc, unsigned char ecc_code)
     : gr::sync_block("gr_rds_encoder", gr::io_signature::make(0, 0, 0), gr::io_signature::make(1, 1, sizeof(unsigned char))),
 
-      // RDS Parameters and Flags
-      d_pty_locale(pty_locale),   // PTY display standard (Europe or North America)
+      // Core RDS Parameters
       d_pi(0),                    // Program Identification, calculated in constructor body
       d_pty(pty),                 // programm type (education)
-      d_af_list(af_list),         // alternate frequency list
+      d_pty_locale(pty_locale),   // PTY display standard (Europe or North America)
       d_ecc_code(ecc_code),       // Value for the new ECC feature
+      d_af_list(af_list),         // alternate frequency list
+
+      // Dynamic Broadcast Flags
       d_ms(ms),                   // music/speech switch (1=music)
+      d_di_stereo(di_stereo),     // DI flag for stereo audio (d0)
+      d_di_artificial_head(di_artificial_head), // DI flag for artificial head (d1)
+      d_di_compressed(di_compressed),           // DI flag for compressed audio (d2)
+      d_di_dynamic_pty(di_dynamic_pty),         // DI flag for dynamic PTY (d3)
       d_tp(tp),                   // traffic programm
       d_ta(ta),                   // traffic announcement
 
-      // Feature Flags
+      // Feature-Enable Flags
       d_af(af),                   // Enable sending Alternate Frequency in Group 0A
       d_tmc(tmc),                 // Enable sending TMC groups
       d_ct(ct),                   // Enable sending Clock-Time group
       d_ecc(ecc),                 // Enable sending Extended Country Code group
+      d_ptyn(ptyn),               // Enable sending Program Type Name group
 
       // Internal State
       d_ps_segment_index(0),
       d_radiotext_segment_index(0),
       d_tmc_segment_index(0),
       d_af_index(0),
+      d_ptyn_segment_index(0),
+      d_ptyn_ab_flag(false),
       d_buffer_bit_counter(0),
       d_last_ct_time(0),
+      d_rebuild_needed(false),
 
       // Hard-coded TMC Data
       d_tmc_alert_data({3, 2, 1340, 11023})
@@ -102,9 +112,10 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::stri
 	std::memset(d_infoword,    0, sizeof(d_infoword));
 	std::memset(d_checkword,   0, sizeof(d_checkword));
 	std::memset(d_groups,      0, sizeof(d_groups));
-    std::memset(d_radiotext,   ' ', sizeof(d_radiotext));
-    std::memset(d_ps,          ' ', sizeof(d_ps));
-    std::memset(d_current_group_buffer, 0, sizeof(d_current_group_buffer));
+    	std::memset(d_radiotext,   ' ', sizeof(d_radiotext));
+    	std::memset(d_ps,          ' ', sizeof(d_ps));
+    	std::memset(d_ptyn_str,    ' ', sizeof(d_ptyn_str));
+    	std::memset(d_current_group_buffer, 0, sizeof(d_current_group_buffer));
 
 	if (pi_country_code == 0) {
 		d_pi = pi_reference_number;
@@ -114,6 +125,7 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::stri
 
 	set_radiotext(radiotext);
 	set_ps(ps);
+    set_ptyn(ptyn_str);
 
 	// Configure which groups are set based on flags
 	d_groups[0] = 1;  // 0A: basic tuning and switching
@@ -124,6 +136,7 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ms, std::stri
         d_groups[3] = 1; // 3A: announce TMC
         d_groups[8] = 1; // 8A: TMC data
     }
+    if (d_ptyn) { d_groups[10] = 1; } // 10A: PTYN
 
     rebuild();
 }
@@ -144,11 +157,11 @@ void encoder_impl::rebuild() {
 
     // Reset transmission state
     d_buffer_bit_counter = 0;
-    d_last_ct_time = 0;
     d_ps_segment_index = 0;
     d_radiotext_segment_index = 0;
     d_tmc_segment_index = 0;
     d_af_index = 0;
+    d_ptyn_segment_index = 0;
 
     // Configure the scheduler state for all 32 possible groups
     for (int i = 0; i < 32; i++) {
@@ -190,10 +203,12 @@ void encoder_impl::rds_in(pmt::pmt_t msg) {
 
 	if(phrase_parse(in.begin(), in.end(), "pty" >> (("0x" >> hex) | uint_), space, ui1)) {
 		set_pty(ui1);
-	} else if(phrase_parse(in.begin(), in.end(), "text" >> lexeme[+(char_ - '\n')] >> -lit("\n"), space, s1)) {
+	} else if(phrase_parse(in.begin(), in.end(), "radiotext" >> lexeme[+(char_ - '\n')] >> -lit("\n"), space, s1)) {
 		set_radiotext(s1);
 	} else if(phrase_parse(in.begin(), in.end(), "ps" >> lexeme[+(char_ - '\n')] >> -lit("\n"), space, s1)) {
 		set_ps(s1);
+	} else if(phrase_parse(in.begin(), in.end(), "ptyn_str" >> lexeme[+(char_ - '\n')] >> -lit("\n"), space, s1)) {
+		set_ptyn(s1);
 	} else if(phrase_parse(in.begin(), in.end(), "ta" >> bool_, space, b1)) {
 		set_ta(b1);
 	} else if(phrase_parse(in.begin(), in.end(), "tp" >> bool_, space, b1)) {
@@ -204,11 +219,33 @@ void encoder_impl::rds_in(pmt::pmt_t msg) {
 		set_pi(ui1);
 	} else if(phrase_parse(in.begin(), in.end(), "af_list" >> +double_, space, vd1)) {
         set_af_list(vd1);
+    } else if(phrase_parse(in.begin(), in.end(), "di_stereo" >> bool_, space, b1)) {
+        set_di_stereo(b1);
+    } else if(phrase_parse(in.begin(), in.end(), "di_artificial_head" >> bool_, space, b1)) {
+        set_di_artificial_head(b1);
+    } else if(phrase_parse(in.begin(), in.end(), "di_compressed" >> bool_, space, b1)) {
+        set_di_compressed(b1);
+    } else if(phrase_parse(in.begin(), in.end(), "di_dynamic_pty" >> bool_, space, b1)) {
+        set_di_dynamic_pty(b1);
+    } else if(phrase_parse(in.begin(), in.end(), "af" >> bool_, space, b1)) {
+        set_af_enabled(b1);
+    } else if(phrase_parse(in.begin(), in.end(), "ptyn" >> bool_, space, b1)) {
+        set_ptyn_enabled(b1);
+    } else if(phrase_parse(in.begin(), in.end(), "tmc" >> bool_, space, b1)) {
+        set_tmc_enabled(b1);
+    } else if(phrase_parse(in.begin(), in.end(), "ct" >> bool_, space, b1)) {
+        set_ct_enabled(b1);
+    } else if(phrase_parse(in.begin(), in.end(), "ecc" >> bool_, space, b1)) {
+        set_ecc_enabled(b1);
+    } else if(phrase_parse(in.begin(), in.end(), "ecc_code" >> (("0x" >> hex) | uint_), space, ui1)) {
+        set_ecc_code(ui1);
     } else {
-		std::cout << "RDS: command not understood" << std::endl;
+		std::cout << "RDS: command not understood: " << in << std::endl;
+        return;
 	}
 
-	rebuild();
+    gr::thread::scoped_lock lock(d_mutex);
+	d_rebuild_needed = true;
 }
 
 void encoder_impl::set_ms(bool ms) { d_ms = ms; }
@@ -217,24 +254,64 @@ void encoder_impl::set_ta(bool ta) { d_ta = ta; }
 void encoder_impl::set_pty(unsigned int pty) { if (pty <= 31) d_pty = pty; }
 void encoder_impl::set_pi(unsigned int pi) { if (pi <= 0xFFFF) d_pi = pi; }
 
+void encoder_impl::set_di_stereo(bool stereo) { d_di_stereo = stereo; }
+void encoder_impl::set_di_artificial_head(bool artificial_head) { d_di_artificial_head = artificial_head; }
+void encoder_impl::set_di_compressed(bool compressed) { d_di_compressed = compressed; }
+void encoder_impl::set_di_dynamic_pty(bool dynamic_pty) { d_di_dynamic_pty = dynamic_pty; }
+void encoder_impl::set_ct_enabled(bool ct) { d_ct = ct; }
+void encoder_impl::set_ecc_code(unsigned char ecc_code) { d_ecc_code = ecc_code; }
+
+void encoder_impl::set_af_enabled(bool af) {
+    d_af = af && !d_af_list.empty();
+}
+
 void encoder_impl::set_af_list(const std::vector<double>& af_list)
 {
     gr::thread::scoped_lock lock(d_mutex);
     d_af_list = af_list;
+    if (d_af_list.empty()) {
+        d_af = false;
+    }
     d_af_index = 0;
-    rebuild();
+}
+
+void encoder_impl::set_ptyn_enabled(bool ptyn) {
+    d_ptyn = ptyn;
+    d_groups[10] = ptyn;
+}
+
+void encoder_impl::set_tmc_enabled(bool tmc) {
+    d_tmc = tmc;
+    d_groups[3] = tmc;
+    d_groups[8] = tmc;
+}
+
+void encoder_impl::set_ecc_enabled(bool ecc) {
+    d_ecc = ecc;
+    d_groups[1] = ecc;
 }
 
 void encoder_impl::set_radiotext(std::string text) {
+    gr::thread::scoped_lock lock(d_mutex);
 	size_t len = std::min(sizeof(d_radiotext), text.length());
 	std::memset(d_radiotext, ' ', sizeof(d_radiotext));
 	std::memcpy(d_radiotext, text.c_str(), len);
 }
 
 void encoder_impl::set_ps(std::string ps) {
+    gr::thread::scoped_lock lock(d_mutex);
 	size_t len = std::min(sizeof(d_ps), ps.length());
 	std::memset(d_ps, ' ', sizeof(d_ps));
 	std::memcpy(d_ps, ps.c_str(), len);
+}
+
+void encoder_impl::set_ptyn(std::string ptyn_str) {
+    gr::thread::scoped_lock lock(d_mutex);
+    d_ptyn_ab_flag = !d_ptyn_ab_flag;
+    d_ptyn_segment_index = 0;
+    size_t len = std::min(sizeof(d_ptyn_str), ptyn_str.length());
+    std::memset(d_ptyn_str, ' ', sizeof(d_ptyn_str));
+    std::memcpy(d_ptyn_str, ptyn_str.c_str(), len);
 }
 
 /* see Annex B, page 64 of the standard */
@@ -271,8 +348,17 @@ unsigned int encoder_impl::encode_af(const double af) {
 /* create the 4 infowords, according to group type.
  * then calculate checkwords and put everything in the groups */
 void encoder_impl::create_group(const int group_type, const bool AB) {
+    // Lock the mutex to prevent configuration changes during group generation.
+    // This protects against race conditions from the PMT message handler.
+    gr::thread::scoped_lock lock(d_mutex);
+
+	// Initialize all infowords to a known state before populating them.
+	// This prevents "stale data" from a previous group generation from
+	// bleeding through and causing intermittent corruption.
 	d_infoword[0] = d_pi;
 	d_infoword[1] = (((group_type & 0xf) << 12) | (AB << 11) | (d_tp << 10) | (d_pty << 5));
+	d_infoword[2] = 0;
+	d_infoword[3] = 0;
 
 	if(group_type == 0) prepare_group0(AB);
 	else if(group_type == 1) prepare_group1a();
@@ -280,6 +366,7 @@ void encoder_impl::create_group(const int group_type, const bool AB) {
 	else if(group_type == 3) prepare_group3a();
 	else if(group_type == 4) prepare_group4a(time(NULL) + 60);
 	else if(group_type == 8) prepare_group8a();
+    else if(group_type == 10) prepare_group10a();
 	else if(group_type == 11) prepare_group11a();
 
 	for(int i= 0; i < 4; i++) {
@@ -295,9 +382,29 @@ void encoder_impl::create_group(const int group_type, const bool AB) {
 
 void encoder_impl::prepare_group0(const bool AB) {
 	d_infoword[1] |= (d_ta << 4) | (d_ms << 3);
-	//FIXME: make DI configurable
-	if(d_ps_segment_index == 3)
-		d_infoword[1] |= 0x5;  // d0=1 (stereo), d1-3=0
+
+	// Decoder Identification (DI) flags are multiplexed based on the PS segment index,
+	// transmitted most-significant-bit (d3) first, as per IEC 62106 / NRSC-4-B.
+	// The DI bit (bit 2) is set according to the flag corresponding to the current segment.
+	bool di_bit_to_set = false;
+	switch (d_ps_segment_index) {
+	case 0:
+		di_bit_to_set = d_di_dynamic_pty; // Segment 0 (C1C0=00) sends d3
+		break;
+	case 1:
+		di_bit_to_set = d_di_compressed; // Segment 1 (C1C0=01) sends d2
+		break;
+	case 2:
+		di_bit_to_set = d_di_artificial_head; // Segment 2 (C1C0=10) sends d1
+		break;
+	case 3:
+		di_bit_to_set = d_di_stereo; // Segment 3 (C1C0=11) sends d0
+		break;
+	}
+	if (di_bit_to_set) {
+		d_infoword[1] |= (1 << 2);
+	}
+
 	d_infoword[1] |= (d_ps_segment_index & 0x3);
 	if(!AB) { // This is Group 0A
         if (d_af && !d_af_list.empty()) { // AF is enabled and list is not empty
@@ -404,6 +511,30 @@ void encoder_impl::prepare_group8a(void) {
 	d_infoword[3] = d_tmc_alert_data.location_code;
 }
 
+// Group 10A: Program Type Name
+void encoder_impl::prepare_group10a(void) {
+    // The segment index (0 or 1) determines which half we send THIS time.
+    unsigned int current_segment = d_ptyn_segment_index;
+
+    // Block 2: Set Text A/B flag (b4) and Segment Address (b0)
+    d_infoword[1] |= (d_ptyn_ab_flag << 4) | (current_segment & 0x1);
+
+    // Blocks 3 & 4: Character data
+    if (current_segment == 0) {
+        // First half of the PTYN string
+        d_infoword[2] = (d_ptyn_str[0] << 8) | d_ptyn_str[1];
+        d_infoword[3] = (d_ptyn_str[2] << 8) | d_ptyn_str[3];
+    } else {
+        // Second half of the PTYN string
+        d_infoword[2] = (d_ptyn_str[4] << 8) | d_ptyn_str[5];
+        d_infoword[3] = (d_ptyn_str[6] << 8) | d_ptyn_str[7];
+    }
+
+    // After preparing this group, toggle the index so the *next* 10A group
+    // that gets scheduled will be the other half.
+    d_ptyn_segment_index = (d_ptyn_segment_index + 1) % 2;
+}
+
 // for now single-group only
 void encoder_impl::prepare_group11a(void) {
 	d_infoword[1] |= (0xb1c8 & 0x1f);
@@ -432,12 +563,20 @@ int encoder_impl::work (int noutput_items,
 		gr_vector_const_void_star &input_items,
 		gr_vector_void_star &output_items) {
 
-	gr::thread::scoped_lock lock(d_mutex);
 	unsigned char *out = (unsigned char *) output_items[0];
 
 	for(int i = 0; i < noutput_items; i++) {
         // A new group must be scheduled and generated at the start of each 104-bit block.
         if (d_buffer_bit_counter == 0) {
+
+            // Check if a rebuild was requested by a PMT command.
+            // This is the only safe place to reset the state, ensuring we do it
+            // between full group transmissions to avoid corruption.
+            if (d_rebuild_needed) {
+                rebuild();
+                d_rebuild_needed = false;
+            }
+
             int group_to_send = -1;
             bool ab_flag_to_send = false;
             int chosen_idx = -1;
@@ -517,13 +656,16 @@ int encoder_impl::work (int noutput_items,
 	return noutput_items;
 }
 
-encoder::sptr encoder::make (unsigned char pty_locale, int pty, bool ms,
+encoder::sptr encoder::make (unsigned char pty_locale, int pty, bool ptyn, std::string ptyn_str, bool ms,
+        bool di_stereo, bool di_artificial_head, bool di_compressed, bool di_dynamic_pty,
 		std::string ps, bool af, const std::vector<double>& af_list, bool tp,
 		bool ta, bool tmc, bool ct, int pi_country_code, int pi_coverage_area,
 		int pi_reference_number, std::string radiotext, bool ecc, unsigned char ecc_code) {
 
 	return gnuradio::get_initial_sptr(
-			new encoder_impl(pty_locale, pty, ms, ps, af, af_list, tp, ta,
+			new encoder_impl(pty_locale, pty, ptyn, ptyn_str, ms,
+                    di_stereo, di_artificial_head, di_compressed, di_dynamic_pty,
+                    ps, af, af_list, tp, ta,
                     tmc, ct, pi_country_code, pi_coverage_area, pi_reference_number,
 					radiotext, ecc, ecc_code));
 }

@@ -14,7 +14,7 @@
 /* BINDTOOL_GEN_AUTOMATIC(0)                                                       */
 /* BINDTOOL_USE_PYGCCXML(0)                                                        */
 /* BINDTOOL_HEADER_FILE(encoder.h)                                       	   */
-/* BINDTOOL_HEADER_FILE_HASH(67c785ff913f23410ca8e5dbc09a9a6b)                     */
+/* BINDTOOL_HEADER_FILE_HASH(d928a85ebe0b87dacaeab7631a255e14)                     */
 /***********************************************************************************/
 
 #include <pybind11/complex.h>
@@ -40,7 +40,13 @@ void bind_encoder(py::module& m)
         .def(py::init(&encoder::make),
              py::arg("pty_locale"),
              py::arg("pty"),
+             py::arg("ptyn"),
+             py::arg("ptyn_str"),
              py::arg("ms"),
+             py::arg("di_stereo"),
+             py::arg("di_artificial_head"),
+             py::arg("di_compressed"),
+             py::arg("di_dynamic_pty"),
              py::arg("ps"),
              py::arg("af"),
              py::arg("af_list"),
@@ -64,5 +70,10 @@ void bind_encoder(py::module& m)
         .def("set_af_list",
              &encoder::set_af_list,
              py::arg("af_list"),
-             D(encoder, set_af_list));
+             D(encoder, set_af_list))
+
+        .def("set_ptyn",
+             &encoder::set_ptyn,
+             py::arg("ptyn_str"),
+             D(encoder, set_ptyn));
 }

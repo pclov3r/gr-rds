@@ -31,6 +31,9 @@
  static const char *__doc_gr_rds_encoder_set_ps = R"doc()doc";
 
 
+ static const char *__doc_gr_rds_encoder_set_ptyn = R"doc()doc";
+
+
  static const char *__doc_gr_rds_encoder_set_af_list = R"doc()doc";
 
-  
+ 

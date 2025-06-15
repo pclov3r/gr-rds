@@ -31,7 +31,13 @@ public:
 	typedef std::shared_ptr<encoder> sptr;
 	static sptr make(unsigned char pty_locale,
                      int pty,
+                     bool ptyn,
+                     std::string ptyn_str,
                      bool ms,
+                     bool di_stereo,
+                     bool di_artificial_head,
+                     bool di_compressed,
+                     bool di_dynamic_pty,
                      std::string ps,
                      bool af,
                      const std::vector<double>& af_list,
@@ -48,6 +54,7 @@ public:
 
     virtual void set_ps(std::string ps) = 0;
     virtual void set_af_list(const std::vector<double>& af_list) = 0;
+    virtual void set_ptyn(std::string ptyn_str) = 0;
 };
 
 }
