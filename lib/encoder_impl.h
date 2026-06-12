@@ -41,7 +41,7 @@ public:
                  bool di_stereo, bool di_artificial_head, bool di_compressed, bool di_dynamic_pty,
                  std::string ps, bool af, const std::vector<double>& af_list, bool tp, bool ta, bool tmc, bool ct,
                  int pi_country_code, int pi_coverage_area, int pi_reference_number,
-                 std::string radiotext, bool ecc, unsigned char ecc_code);
+                 std::string radiotext, bool ecc, unsigned char ecc_code, int max_latency);
 
     // Public API functions
     void set_ps(std::string ps) override;
@@ -55,6 +55,11 @@ private:
 	int work(int noutput_items,
 			gr_vector_const_void_star &input_items,
 			gr_vector_void_star &output_items) override;
+
+	int d_max_latency;
+	int d_tokens;
+	void add_token(pmt::pmt_t tag);
+	tag_t d_tag;
 	void rebuild();
 	void set_ms(bool ms);
 	void set_tp(bool tp);

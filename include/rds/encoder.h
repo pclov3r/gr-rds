@@ -50,7 +50,8 @@ public:
                      int pi_reference_number,
                      std::string radiotext,
                      bool enable_ecc,
-                     unsigned char ecc);
+                     unsigned char ecc,
+                     int max_latency = -1);
 
     virtual void set_ps(std::string ps) = 0;
     virtual void set_af_list(const std::vector<double>& af_list) = 0;

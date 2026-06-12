@@ -13,8 +13,8 @@
 /* If manual edits are made, the following tags should be modified accordingly.    */
 /* BINDTOOL_GEN_AUTOMATIC(0)                                                       */
 /* BINDTOOL_USE_PYGCCXML(0)                                                        */
-/* BINDTOOL_HEADER_FILE(encoder.h)                                       	   */
-/* BINDTOOL_HEADER_FILE_HASH(d928a85ebe0b87dacaeab7631a255e14)                     */
+/* BINDTOOL_HEADER_FILE(encoder.h)                                        */
+/* BINDTOOL_HEADER_FILE_HASH(611693a878b8dd90d9d09c71de20e858)                     */
 /***********************************************************************************/
 
 #include <pybind11/complex.h>
@@ -60,6 +60,7 @@ void bind_encoder(py::module& m)
              py::arg("radiotext"),
              py::arg("enable_ecc"),
              py::arg("ecc"),
+             py::arg("max_latency") = -1,
              D(encoder, make))
 
         .def("set_ps",

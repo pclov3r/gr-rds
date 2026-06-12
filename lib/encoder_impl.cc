@@ -26,6 +26,7 @@
 #include <math.h>
 #include <ctype.h>
 #include <time.h>
+#include <chrono>
 #include <cstdio>
 #include <iostream>
 #include <vector>
@@ -66,7 +67,7 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ptyn, std::st
                            bool di_stereo, bool di_artificial_head, bool di_compressed, bool di_dynamic_pty,
                            std::string ps, bool af, const std::vector<double>& af_list, bool tp, bool ta, bool tmc, bool ct,
                            int pi_country_code, int pi_coverage_area, int pi_reference_number,
-                           std::string radiotext, bool ecc, unsigned char ecc_code)
+                           std::string radiotext, bool ecc, unsigned char ecc_code, int max_latency)
     : gr::sync_block("gr_rds_encoder", gr::io_signature::make(0, 0, 0), gr::io_signature::make(1, 1, sizeof(unsigned char))),
 
       // Core RDS Parameters
@@ -139,6 +140,13 @@ encoder_impl::encoder_impl(unsigned char pty_locale, int pty, bool ptyn, std::st
     if (d_ptyn) { d_groups[10] = 1; } // 10A: PTYN
 
     rebuild();
+
+	d_max_latency = max_latency;
+	d_tokens = d_max_latency;
+	message_port_register_in(pmt::mp("strobe"));
+	set_msg_handler(pmt::mp("strobe"), [this](pmt::pmt_t msg) { this->add_token(msg); });
+	d_tag.key = pmt::intern("rds_latency_strobe");
+	d_tag.srcid = alias_pmt();
 }
 
 encoder_impl::~encoder_impl() {
@@ -550,6 +558,13 @@ void encoder_impl::prepare_buffer() {
 	}
 }
 
+void encoder_impl::add_token(pmt::pmt_t msg)
+{
+	if(d_max_latency != -1) {
+		d_tokens++;
+	}
+}
+
 // Main processing loop implementing the dynamic RDS group scheduler.
 // At the beginning of each 104-bit group slot, this function determines which
 // RDS group to transmit next based on a two-stage process:
@@ -564,8 +579,13 @@ int encoder_impl::work (int noutput_items,
 		gr_vector_void_star &output_items) {
 
 	unsigned char *out = (unsigned char *) output_items[0];
+	int items_produced = 0;
 
 	for(int i = 0; i < noutput_items; i++) {
+		if(d_tokens == 0) {
+			break;
+		}
+
         // A new group must be scheduled and generated at the start of each 104-bit block.
         if (d_buffer_bit_counter == 0) {
 
@@ -646,6 +666,14 @@ int encoder_impl::work (int noutput_items,
 
         // 5. Output the next bit from the currently generated group.
         out[i] = d_current_group_buffer[d_buffer_bit_counter];
+		items_produced++;
+
+		if(d_max_latency != -1) {
+			d_tag.offset = nitems_written(0) + i;
+			d_tag.value = pmt::from_long(d_tag.offset);
+			add_item_tag(0, d_tag);
+			d_tokens--;
+		}
 
         // Advance the bit counter for the current 104-bit group.
 		if(++d_buffer_bit_counter > 103) {
@@ -653,19 +681,23 @@ int encoder_impl::work (int noutput_items,
 		}
 	}
 
-	return noutput_items;
+	if(items_produced == 0) {
+		std::this_thread::sleep_for(std::chrono::microseconds(100));
+	}
+
+	return items_produced;
 }
 
 encoder::sptr encoder::make (unsigned char pty_locale, int pty, bool ptyn, std::string ptyn_str, bool ms,
         bool di_stereo, bool di_artificial_head, bool di_compressed, bool di_dynamic_pty,
 		std::string ps, bool af, const std::vector<double>& af_list, bool tp,
 		bool ta, bool tmc, bool ct, int pi_country_code, int pi_coverage_area,
-		int pi_reference_number, std::string radiotext, bool ecc, unsigned char ecc_code) {
+		int pi_reference_number, std::string radiotext, bool ecc, unsigned char ecc_code, int max_latency) {
 
 	return gnuradio::get_initial_sptr(
 			new encoder_impl(pty_locale, pty, ptyn, ptyn_str, ms,
                     di_stereo, di_artificial_head, di_compressed, di_dynamic_pty,
                     ps, af, af_list, tp, ta,
                     tmc, ct, pi_country_code, pi_coverage_area, pi_reference_number,
-					radiotext, ecc, ecc_code));
+					radiotext, ecc, ecc_code, max_latency));
 }

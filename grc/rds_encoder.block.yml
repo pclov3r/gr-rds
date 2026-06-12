@@ -139,10 +139,17 @@ parameters:
     dtype: int
     default: '0xE0'
     hide: ${ 'all' if str(pi_country_code) != '0' or not ecc else 'none' }
+-   id: max_latency
+    label: Max. latency (bits)
+    dtype: int
+    default: '-1'
 
 inputs:
 -   domain: message
     id: rds in
+    optional: true
+-   domain: message
+    id: strobe
     optional: true
 
 outputs:
@@ -153,7 +160,7 @@ templates:
     imports: import rds
     make: "rds.encoder(${pty_locale}, ${pty}, ${ptyn}, ${ptyn_str}, ${ms}, ${di_stereo}, ${di_artificial_head}, ${di_compressed}, ${di_dynamic_pty}, ${ps}, ${af}, [${af_list}],\n\t\t\t${tp},\
         \ ${ta}, ${tmc}, ${ct}, ${pi_country_code}, ${pi_coverage_area},\n\t\t\t${ pi_code_full if str(pi_country_code) == '0' else pi_reference_number },\
-        \ ${radiotext}, ${ecc}, ${ ecc_code if ecc else 0 })"
+        \ ${radiotext}, ${ecc}, ${ ecc_code if ecc else 0 }, ${max_latency})"
     callbacks:
     - set_ps(${ps})
     - set_af_list([${af_list}])
@@ -175,5 +182,6 @@ documentation: |-
     PI: Program Identification. If a specific country is chosen, its code is combined with the Coverage Area and Program Reference Number to generate the PI code. If the Country Code is 'Other', a full 16-bit PI Code must be entered directly (e.g. 0xFFFF).
     Radiotext: Radiotext (64 chars)
     ECC: Extended Country Code
+    Max. latency: Maximum number of bits that will be sent by the RDS Encoder before receiving an acknowledgement message from the downstream "Latency Tag to Message" block; use -1 for unlimited
 
 file_format: 1
